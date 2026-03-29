@@ -1644,12 +1644,38 @@ function parseFroniusArchiveDetail(payload) {
 function parseArchiveDetail(payload) {
 	const bodyData = payload?.Body?.Data;
 	if (!bodyData || typeof bodyData !== 'object') {
-		throw new Error('Invalid archive payload: missing Body.Data');
+		return {
+			buckets: [],
+			diagnostics: {
+				import_history_present: false,
+				export_history_present: false,
+				selected_import_channels: [],
+				selected_export_channels: [],
+				all_channels: [],
+				nodes: [],
+				warnings: [
+					'Archive payload did not include Body.Data for this range; treating as empty archive response.',
+				],
+			},
+		};
 	}
 
 	const nodeEntries = Object.entries(bodyData).filter(([, node]) => node && typeof node === 'object');
 	if (nodeEntries.length < 1) {
-		throw new Error('Invalid archive payload: no data nodes in Body.Data');
+		return {
+			buckets: [],
+			diagnostics: {
+				import_history_present: false,
+				export_history_present: false,
+				selected_import_channels: [],
+				selected_export_channels: [],
+				all_channels: [],
+				nodes: [],
+				warnings: [
+					'Archive payload had no data nodes for this range; treating as empty archive response.',
+				],
+			},
+		};
 	}
 
 	const mergedByChannel = {};
