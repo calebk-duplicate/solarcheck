@@ -62,6 +62,38 @@ export interface BillResponse {
   days: BillDayRow[]
 }
 
+export interface BillIntervalRow {
+  ts_utc: string
+  ts_local: string
+  import_kwh: number
+  export_kwh: number
+  import_rate_cents_per_kwh: number
+  export_rate_cents_per_kwh: number
+  import_cost: number
+  export_credit: number
+  net_cost: number
+}
+
+export interface BillIntervalsSummary {
+  from_utc: string
+  to_utc: string
+  interval_minutes: number
+  timezone: string
+  count: number
+  total_import_kwh: number
+  total_export_kwh: number
+  total_import_cost: number
+  total_export_credit: number
+  total_net_cost: number
+}
+
+export interface BillIntervalsResponse {
+  summary: BillIntervalsSummary
+  intervals: BillIntervalRow[]
+  source: 'energy_5m'
+  archive_warnings?: string[]
+}
+
 export interface Energy5mPoint {
   ts_utc: string
   import_wh: number

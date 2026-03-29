@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getLive, getHistory, getDaily, getRates, USE_MOCK } from '../api/client'
+import { getLive, getHistory, getDaily, getRates, getBill, USE_MOCK } from '../api/client'
 import type { LiveResponse, HistoryResponse, DailyResponse, RatesResponse, RatePeriod } from '../types'
 import { MetricCard } from '../components/MetricCard'
 import { StatusBadge } from '../components/StatusBadge'
@@ -71,17 +71,29 @@ export function Dashboard() {
         setIsLoading(true)
         const now = new Date()
         const yesterday = subHours(now, 24)
+        const dayStart = new Date(now)
+        dayStart.setHours(0, 0, 0, 0)
 
-        const [live, history, daily, ratesData] = await Promise.all([
+        const [live, history, daily, ratesData, bill] = await Promise.all([
           getLive(),
           getHistory(yesterday.toISOString(), now.toISOString()),
-          getDaily(now.toISOString().split('T')[0], now.toISOString().split('T')[0]),
+          getDaily(dayStart.toISOString(), now.toISOString()),
           getRates(),
+          getBill(dayStart.toISOString(), now.toISOString()).catch(() => null),
         ])
+
+        const mergedDaily = daily
+          ? {
+              ...daily,
+              import_cost: bill?.summary.total_import_cost,
+              export_credit: bill?.summary.total_export_credit,
+              net_cost: bill?.summary.total_net_cost,
+            }
+          : null
 
         setLiveData(live)
         setHistoryData(history)
-        setDailyData(daily)
+        setDailyData(mergedDaily)
         setRates(ratesData)
         setLastLiveSuccessAt(Date.now())
         setLastLiveError(null)

@@ -1,4 +1,12 @@
-import type { LiveResponse, HistoryResponse, DailyResponse, RatesResponse, BillResponse, Energy5mResponse } from '../types'
+import type {
+  LiveResponse,
+  HistoryResponse,
+  DailyResponse,
+  RatesResponse,
+  BillResponse,
+  BillIntervalsResponse,
+  Energy5mResponse,
+} from '../types'
 import { getMockLive, getMockHistory, getMockDaily } from './mock'
 
 export const USE_MOCK = false
@@ -121,6 +129,18 @@ export async function getBill(
     throw new Error(`HTTP ${response.status}: ${response.statusText}`)
   }
   return (await response.json()) as BillResponse
+}
+
+export async function getBillIntervals(
+  fromIso: string,
+  toIso: string
+): Promise<BillIntervalsResponse> {
+  const url = `/api/bill-intervals?from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  }
+  return (await response.json()) as BillIntervalsResponse
 }
 
 export async function fetchEnergy5m(

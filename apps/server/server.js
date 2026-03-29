@@ -23,6 +23,24 @@ const ARCHIVE_BACKFILL_MINUTES = Number.parseInt(process.env.ARCHIVE_BACKFILL_MI
 const ARCHIVE_LOOKBACK_DAYS = Number.parseInt(process.env.ARCHIVE_LOOKBACK_DAYS || '2', 10);
 const MANUAL_ARCHIVE_MAX_MONTHS = Number.parseInt(process.env.MANUAL_ARCHIVE_MAX_MONTHS || '24', 10);
 const MANUAL_ARCHIVE_CHUNK_DAYS = Number.parseInt(process.env.MANUAL_ARCHIVE_CHUNK_DAYS || '2', 10);
+const ARCHIVE_DEBUG_LOG = String(process.env.ARCHIVE_DEBUG_LOG || '1') !== '0';
+
+const ARCHIVE_IMPORT_CHANNEL_CANDIDATES = [
+	{ key: 'EnergyReal_WAC_Plus_Absolute', kind: 'absolute' },
+	{ key: 'EnergyReal_WAC_Sum_Consumed', kind: 'delta' },
+];
+
+const ARCHIVE_EXPORT_CHANNEL_CANDIDATES = [
+	{ key: 'EnergyReal_WAC_Minus_Absolute', kind: 'absolute' },
+	{ key: 'EnergyReal_WAC_Sum_Produced', kind: 'delta' },
+];
+
+const ARCHIVE_CHANNEL_PROBE_LIST = Array.from(
+	new Set([
+		...ARCHIVE_IMPORT_CHANNEL_CANDIDATES.map((item) => item.key),
+		...ARCHIVE_EXPORT_CHANNEL_CANDIDATES.map((item) => item.key),
+	]),
+);
 
 if (!INVERTER_BASE_URL) {
 	throw new Error('Missing required environment variable: INVERTER_BASE_URL');
@@ -89,6 +107,18 @@ const state = {
 	},
 	consecutiveZeroLoadWithPv: 0,
 	liveDataWarning: null,
+	archiveDiagnostics: {
+		last_probe_at_utc: null,
+		last_probe_start_local: null,
+		last_probe_end_local: null,
+		import_history_present: false,
+		export_history_present: false,
+		selected_import_channels: [],
+		selected_export_channels: [],
+		all_channels: [],
+		nodes: [],
+		warnings: [],
+	},
 };
 
 initializeDatabase(db);
@@ -328,15 +358,56 @@ api.get('/bill', (req, res) => {
 			});
 		}
 
+		const readings = statements.getHistoryInRange.all(range.from, range.to);
+		if (readings.length >= 2) {
+			const bill = aggregateBillFromReadings(readings, rates, range.from, range.to);
+			return res.json({ ...bill, source: 'readings' });
+		}
+
 		const energyRows = statements.getEnergy5mInRange.all(range.from, range.to);
 		if (energyRows.length >= 1) {
 			const bill = aggregateBillFromEnergy5m(energyRows, rates, range.from, range.to);
 			return res.json({ ...bill, source: 'energy_5m' });
 		}
 
-		const readings = statements.getHistoryInRange.all(range.from, range.to);
 		const bill = aggregateBillFromReadings(readings, rates, range.from, range.to);
 		return res.json({ ...bill, source: 'readings' });
+	} catch (error) {
+		return res.status(400).json({ error: error?.message || String(error) });
+	}
+});
+
+api.get('/bill-intervals', (req, res) => {
+	try {
+		const range = parseRange(req.query.from, req.query.to, 24 * 7);
+		const rates = getRatesSettings(statements);
+		const sourceQuery = req.query.source;
+
+		if (sourceQuery === 'readings') {
+			return res.status(400).json({
+				error: 'Interval billing is only supported with energy_5m source',
+			});
+		}
+
+		if (sourceQuery !== undefined && sourceQuery !== null && sourceQuery !== '' && sourceQuery !== 'energy_5m') {
+			return res.status(400).json({
+				error: 'Invalid source query param; expected energy_5m',
+			});
+		}
+
+		const energyRows = statements.getEnergy5mInRange.all(range.from, range.to);
+		if (energyRows.length < 1) {
+			return res.status(400).json({
+				error: 'No energy_5m data found for requested range',
+			});
+		}
+
+		const intervalBill = aggregateBillIntervalsFromEnergy5m(energyRows, rates, range.from, range.to);
+		return res.json({
+			...intervalBill,
+			source: 'energy_5m',
+			archive_warnings: state.archiveDiagnostics?.warnings || [],
+		});
 	} catch (error) {
 		return res.status(400).json({ error: error?.message || String(error) });
 	}
@@ -397,6 +468,47 @@ api.post('/archive/backfill', (req, res) => {
 
 api.get('/archive/backfill/status', (_req, res) => {
 	res.json(getManualArchiveBackfillStatus());
+});
+
+api.get('/archive/diagnostics', async (req, res) => {
+	try {
+		const range = parseRange(req.query.from, req.query.to, 24 * 7);
+		const rates = getRatesSettings(statements);
+		const timezone = rates.timezone || DEFAULT_TIMEZONE;
+
+		const startLocalDate = DateTime.fromISO(range.from, { zone: 'utc' }).setZone(timezone).toFormat('yyyy-LL-dd');
+		const endLocalDate = DateTime.fromISO(range.to, { zone: 'utc' }).setZone(timezone).toFormat('yyyy-LL-dd');
+
+		if (!startLocalDate || !endLocalDate) {
+			throw new Error('Failed to compute local archive diagnostic range');
+		}
+
+		await fetchArchiveDetail(INVERTER_BASE_URL, startLocalDate, endLocalDate, {
+			context: 'diagnostics',
+			emitDiagnosticsLog: true,
+		});
+
+		const readings = statements.getHistoryInRange.all(range.from, range.to);
+		const energyRows = statements.getEnergy5mInRange.all(range.from, range.to);
+		const energyImportNonZeroCount = energyRows.filter((row) => (Number(row.import_wh) || 0) > 0).length;
+		const energyExportNonZeroCount = energyRows.filter((row) => (Number(row.export_wh) || 0) > 0).length;
+
+		return res.json({
+			from_utc: range.from,
+			to_utc: range.to,
+			timezone,
+			archive: state.archiveDiagnostics,
+			coverage: {
+				readings_count: readings.length,
+				readings_present: readings.length >= 2,
+				energy_5m_count: energyRows.length,
+				energy_5m_import_non_zero_count: energyImportNonZeroCount,
+				energy_5m_export_non_zero_count: energyExportNonZeroCount,
+			},
+		});
+	} catch (error) {
+		return res.status(400).json({ error: error?.message || String(error) });
+	}
 });
 
 app.use('/api', api);
@@ -734,18 +846,6 @@ function aggregateBillFromReadings(rows, rates, fromUtc, toUtc) {
 	const timezone = rates.timezone;
 	const dailyMap = new Map();
 
-	for (const dayLocal of enumerateLocalDaysInRange(fromUtc, toUtc, timezone)) {
-		dailyMap.set(dayLocal, {
-			day_local: dayLocal,
-			import_kwh: 0,
-			export_kwh: 0,
-			import_cost: 0,
-			export_credit: 0,
-			fixed_charge: Number(rates.daily_fixed_cents),
-			net_cost: 0,
-		});
-	}
-
 	const rateBoundaryMinutes = collectRateBoundaryMinutes(rates);
 
 	if (rows && rows.length >= 2) {
@@ -928,6 +1028,63 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 	return {
 		summary,
 		days,
+	};
+}
+
+function aggregateBillIntervalsFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
+	const timezone = rates.timezone;
+	const intervals = [];
+
+	for (const row of rows || []) {
+		const utc = DateTime.fromISO(row.ts_utc, { zone: 'utc' });
+		if (!utc.isValid) {
+			continue;
+		}
+
+		const local = utc.setZone(timezone);
+		if (!local.isValid) {
+			continue;
+		}
+
+		const dayGroup = dayGroupFromLocalDateTime(local);
+		const hhmm = local.toFormat('HH:mm');
+		const importRate = findRateForTime(rates.import_periods, dayGroup, hhmm);
+		const exportRate = findRateForTime(rates.export_periods, dayGroup, hhmm);
+
+		const importKwh = Math.max(0, Number(row.import_wh) || 0) / 1000;
+		const exportKwh = Math.max(0, Number(row.export_wh) || 0) / 1000;
+		const importCost = importKwh * importRate;
+		const exportCredit = exportKwh * exportRate;
+
+		intervals.push({
+			ts_utc: row.ts_utc,
+			ts_local: local.toISO({ suppressMilliseconds: true }),
+			import_kwh: Math.round(importKwh * 10000) / 10000,
+			export_kwh: Math.round(exportKwh * 10000) / 10000,
+			import_rate_cents_per_kwh: round3(importRate),
+			export_rate_cents_per_kwh: round3(exportRate),
+			import_cost: round3(importCost),
+			export_credit: round3(exportCredit),
+			net_cost: round3(importCost - exportCredit),
+		});
+	}
+
+	const summary = {
+		from_utc: fromUtcIso,
+		to_utc: toUtcIso,
+		interval_minutes: 5,
+		timezone,
+		count: intervals.length,
+		total_import_kwh: round3(intervals.reduce((sum, row) => sum + row.import_kwh, 0)),
+		total_export_kwh: round3(intervals.reduce((sum, row) => sum + row.export_kwh, 0)),
+		total_import_cost: round3(intervals.reduce((sum, row) => sum + row.import_cost, 0)),
+		total_export_credit: round3(intervals.reduce((sum, row) => sum + row.export_credit, 0)),
+		total_net_cost: round3(intervals.reduce((sum, row) => sum + row.net_cost, 0)),
+	};
+
+	return {
+		summary,
+		intervals,
 	};
 }
 
@@ -1136,7 +1293,10 @@ async function backfillArchiveOnce() {
 			throw new Error('Failed to compute archive backfill range');
 		}
 
-		const buckets = await fetchArchiveDetail(INVERTER_BASE_URL, startLocalDate, endLocalDate);
+		const buckets = await fetchArchiveDetail(INVERTER_BASE_URL, startLocalDate, endLocalDate, {
+			context: 'auto-backfill',
+			emitDiagnosticsLog: ARCHIVE_DEBUG_LOG,
+		});
 		let upsertedCount = 0;
 
 		for (const bucket of buckets) {
@@ -1255,7 +1415,10 @@ async function runManualArchiveBackfillJob(range) {
 
 		const chunkStartDate = chunkStart.toFormat('yyyy-LL-dd');
 		const chunkEndDate = chunkEnd.toFormat('yyyy-LL-dd');
-		const buckets = await fetchArchiveDetail(INVERTER_BASE_URL, chunkStartDate, chunkEndDate);
+		const buckets = await fetchArchiveDetail(INVERTER_BASE_URL, chunkStartDate, chunkEndDate, {
+			context: 'manual-backfill',
+			emitDiagnosticsLog: ARCHIVE_DEBUG_LOG,
+		});
 
 		let chunkUpserts = 0;
 		for (const bucket of buckets) {
@@ -1387,7 +1550,10 @@ async function fetchPowerFlowReading(baseUrl) {
 }
 
 async function fetchArchiveEnergyBuckets(baseUrl, startLocalIso, endLocalIso) {
-	const buckets = await fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso);
+	const buckets = await fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso, {
+		context: 'fetchArchiveEnergyBuckets',
+		emitDiagnosticsLog: ARCHIVE_DEBUG_LOG,
+	});
 	return buckets.map((bucket) => ({
 		offset_seconds: bucket.offsetSeconds,
 		import_wh: bucket.importWh,
@@ -1395,9 +1561,11 @@ async function fetchArchiveEnergyBuckets(baseUrl, startLocalIso, endLocalIso) {
 	}));
 }
 
-async function fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso) {
+async function fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso, options = {}) {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 15000);
+	const context = options.context || 'archive';
+	const emitDiagnosticsLog = Boolean(options.emitDiagnosticsLog);
 
 	try {
 		const url = new URL(`${baseUrl}/solar_api/v1/GetArchiveData.cgi`);
@@ -1406,8 +1574,10 @@ async function fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso) {
 		url.searchParams.append('HumanReadable', 'True');
 		url.searchParams.append('StartDate', startLocalIso);
 		url.searchParams.append('EndDate', endLocalIso);
-		url.searchParams.append('Channel', 'EnergyReal_WAC_Sum_Consumed');
-		url.searchParams.append('Channel', 'EnergyReal_WAC_Sum_Produced');
+
+		for (const channel of ARCHIVE_CHANNEL_PROBE_LIST) {
+			url.searchParams.append('Channel', channel);
+		}
 
 		const response = await fetch(url, {
 			method: 'GET',
@@ -1427,7 +1597,32 @@ async function fetchArchiveDetail(baseUrl, startLocalIso, endLocalIso) {
 		}
 
 		try {
-			return parseArchiveDetail(payload);
+			const parsed = parseArchiveDetail(payload);
+			state.archiveDiagnostics = {
+				last_probe_at_utc: new Date().toISOString(),
+				last_probe_start_local: startLocalIso,
+				last_probe_end_local: endLocalIso,
+				...parsed.diagnostics,
+			};
+
+			if (emitDiagnosticsLog) {
+				console.log(
+					`[archive-diagnostics] ${JSON.stringify({
+						context,
+						start_local: startLocalIso,
+						end_local: endLocalIso,
+						import_history_present: parsed.diagnostics.import_history_present,
+						export_history_present: parsed.diagnostics.export_history_present,
+						selected_import_channels: parsed.diagnostics.selected_import_channels,
+						selected_export_channels: parsed.diagnostics.selected_export_channels,
+						all_channels: parsed.diagnostics.all_channels,
+						warnings: parsed.diagnostics.warnings,
+						nodes: parsed.diagnostics.nodes,
+					})}`,
+				);
+			}
+
+			return parsed.buckets;
 		} catch (error) {
 			console.error('[archive] failed to parse payload:', JSON.stringify(payload, null, 2));
 			throw error;
@@ -1452,31 +1647,64 @@ function parseArchiveDetail(payload) {
 		throw new Error('Invalid archive payload: missing Body.Data');
 	}
 
-	const firstNode = Object.values(bodyData).find((node) => node && typeof node === 'object');
-	if (!firstNode || typeof firstNode !== 'object') {
+	const nodeEntries = Object.entries(bodyData).filter(([, node]) => node && typeof node === 'object');
+	if (nodeEntries.length < 1) {
 		throw new Error('Invalid archive payload: no data nodes in Body.Data');
 	}
 
-	const nodeData = firstNode.Data;
-	if (!nodeData || typeof nodeData !== 'object') {
-		throw new Error('Invalid archive payload: node missing Data');
+	const mergedByChannel = {};
+	const allChannels = new Set();
+	const nodeDiagnostics = [];
+
+	for (const [nodeName, node] of nodeEntries) {
+		const nodeData = node?.Data;
+		if (!nodeData || typeof nodeData !== 'object') {
+			continue;
+		}
+
+		const channelNames = Object.keys(nodeData);
+		for (const channelName of channelNames) {
+			allChannels.add(channelName);
+		}
+
+		for (const channelName of channelNames) {
+			const series = nodeData?.[channelName];
+			if (!series || typeof series !== 'object') {
+				continue;
+			}
+
+			if (series.Unit !== undefined && series.Unit !== 'Wh') {
+				continue;
+			}
+
+			const values = series?.Values && typeof series.Values === 'object' ? series.Values : {};
+			if (!Object.prototype.hasOwnProperty.call(mergedByChannel, channelName)) {
+				mergedByChannel[channelName] = {};
+			}
+
+			accumulateByOffset(mergedByChannel[channelName], values);
+		}
+
+		nodeDiagnostics.push({
+			node: nodeName,
+			channels: summarizeArchiveChannels(nodeData),
+		});
 	}
 
-	const consumedSeries = nodeData.EnergyReal_WAC_Sum_Consumed;
-	const producedSeries = nodeData.EnergyReal_WAC_Sum_Produced;
+	const selectedImportSeries = pickArchiveSeries(mergedByChannel, ARCHIVE_IMPORT_CHANNEL_CANDIDATES);
+	const selectedExportSeries = pickArchiveSeries(mergedByChannel, ARCHIVE_EXPORT_CHANNEL_CANDIDATES);
 
-	if (consumedSeries?.Unit !== undefined && consumedSeries.Unit !== 'Wh') {
-		throw new Error(`Invalid unit for EnergyReal_WAC_Sum_Consumed: ${consumedSeries.Unit}`);
-	}
+	const normalizedImportValues = normalizeArchiveSeries(
+		selectedImportSeries ? mergedByChannel[selectedImportSeries.key] : {},
+		selectedImportSeries?.kind || 'delta',
+	);
 
-	if (producedSeries?.Unit !== undefined && producedSeries.Unit !== 'Wh') {
-		throw new Error(`Invalid unit for EnergyReal_WAC_Sum_Produced: ${producedSeries.Unit}`);
-	}
+	const normalizedExportValues = normalizeArchiveSeries(
+		selectedExportSeries ? mergedByChannel[selectedExportSeries.key] : {},
+		selectedExportSeries?.kind || 'delta',
+	);
 
-	const consumedValues = consumedSeries?.Values && typeof consumedSeries.Values === 'object' ? consumedSeries.Values : {};
-	const producedValues = producedSeries?.Values && typeof producedSeries.Values === 'object' ? producedSeries.Values : {};
-
-	const offsets = new Set([...Object.keys(consumedValues), ...Object.keys(producedValues)]);
+	const offsets = new Set([...Object.keys(normalizedImportValues), ...Object.keys(normalizedExportValues)]);
 	const buckets = Array.from(offsets)
 		.map((offsetKey) => {
 			const offsetSeconds = Number.parseInt(offsetKey, 10);
@@ -1484,8 +1712,8 @@ function parseArchiveDetail(payload) {
 				return null;
 			}
 
-			const importWh = safeNumber(consumedValues[offsetKey], 0);
-			const exportWh = safeNumber(producedValues[offsetKey], 0);
+			const importWh = safeNumber(normalizedImportValues[offsetKey], 0);
+			const exportWh = safeNumber(normalizedExportValues[offsetKey], 0);
 
 			return {
 				offsetSeconds,
@@ -1496,7 +1724,124 @@ function parseArchiveDetail(payload) {
 		.filter((bucket) => bucket !== null)
 		.sort((a, b) => a.offsetSeconds - b.offsetSeconds);
 
-	return buckets;
+	const importHistoryPresent = Boolean(selectedImportSeries?.key);
+	const exportHistoryPresent = Boolean(selectedExportSeries?.key);
+	const warnings = [];
+
+	if (!importHistoryPresent) {
+		warnings.push(
+			'No historical import channel found in archive payload. Import history cannot be populated from archive for this range/device.',
+		);
+	}
+
+	if (!exportHistoryPresent) {
+		warnings.push('No historical export channel found in archive payload.');
+	}
+
+	return {
+		buckets,
+		diagnostics: {
+			import_history_present: importHistoryPresent,
+			export_history_present: exportHistoryPresent,
+			selected_import_channels: selectedImportSeries
+				? [{ key: selectedImportSeries.key, kind: selectedImportSeries.kind }]
+				: [],
+			selected_export_channels: selectedExportSeries
+				? [{ key: selectedExportSeries.key, kind: selectedExportSeries.kind }]
+				: [],
+			all_channels: Array.from(allChannels).sort((a, b) => a.localeCompare(b)),
+			nodes: nodeDiagnostics,
+			warnings,
+		},
+	};
+}
+
+function pickArchiveSeries(channelMap, candidates) {
+	for (const candidate of candidates) {
+		const values = channelMap?.[candidate.key];
+		if (!values || typeof values !== 'object') {
+			continue;
+		}
+
+		return {
+			key: candidate.key,
+			kind: candidate.kind,
+		};
+	}
+
+	return null;
+}
+
+function normalizeArchiveSeries(valuesByOffset, kind) {
+	if (!valuesByOffset || typeof valuesByOffset !== 'object') {
+		return {};
+	}
+
+	if (kind === 'absolute') {
+		const sortedEntries = Object.entries(valuesByOffset)
+			.map(([offsetKey, value]) => ({
+				offset: Number.parseInt(offsetKey, 10),
+				value: safeNumber(value, 0),
+			}))
+			.filter((entry) => Number.isInteger(entry.offset) && entry.offset >= 0)
+			.sort((a, b) => a.offset - b.offset);
+
+		const normalized = {};
+		let previousValue = null;
+		for (const entry of sortedEntries) {
+			let delta = 0;
+			if (previousValue !== null) {
+				delta = entry.value - previousValue;
+				if (!Number.isFinite(delta) || delta < 0) {
+					delta = 0;
+				}
+			}
+
+			normalized[String(entry.offset)] = delta;
+			previousValue = entry.value;
+		}
+
+		return normalized;
+	}
+
+	const normalized = {};
+	for (const [offsetKey, value] of Object.entries(valuesByOffset)) {
+		normalized[offsetKey] = Math.max(0, safeNumber(value, 0));
+	}
+
+	return normalized;
+}
+
+function accumulateByOffset(target, values) {
+	for (const [offsetKey, rawValue] of Object.entries(values || {})) {
+		if (!Object.prototype.hasOwnProperty.call(target, offsetKey)) {
+			target[offsetKey] = 0;
+		}
+
+		target[offsetKey] += safeNumber(rawValue, 0);
+	}
+}
+
+function summarizeArchiveChannels(nodeData) {
+	return Object.entries(nodeData).map(([channelName, series]) => {
+		const unit = series?.Unit;
+		const values = series?.Values && typeof series.Values === 'object' ? series.Values : {};
+		const numericValues = Object.values(values).map((value) => safeNumber(value, 0));
+		const nonZeroCount = numericValues.filter((value) => value > 0).length;
+		const maxValue = numericValues.length > 0 ? Math.max(...numericValues) : 0;
+		const sample = Object.entries(values)
+			.slice(0, 3)
+			.map(([offsetSeconds, value]) => ({ offset_seconds: offsetSeconds, value: safeNumber(value, 0) }));
+
+		return {
+			channel: channelName,
+			unit,
+			value_count: numericValues.length,
+			non_zero_count: nonZeroCount,
+			max_value: maxValue,
+			sample,
+		};
+	});
 }
 
 function parseFroniusPayload(payload) {

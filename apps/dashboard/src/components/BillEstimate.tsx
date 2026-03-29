@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { subDays, startOfDay, endOfDay, startOfMonth, endOfMonth, subMonths, format } from 'date-fns'
-import { getBill } from '../api/client'
-import type { BillResponse } from '../types'
+import { getBill, getBillIntervals } from '../api/client'
+import type { BillResponse, BillIntervalsResponse } from '../types'
 
 type RangePreset = 'last7' | 'thisMonth' | 'lastMonth' | 'custom'
 
@@ -47,25 +47,54 @@ interface BillEstimateProps {
 
 export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
   const [preset, setPreset] = useState<RangePreset>('last7')
+  const [breakdownMode, setBreakdownMode] = useState<'daily' | 'interval_5m'>('daily')
   const [customFrom, setCustomFrom] = useState(format(startOfDay(subDays(new Date(), 7)), 'yyyy-MM-dd'))
   const [customTo, setCustomTo] = useState(format(new Date(), 'yyyy-MM-dd'))
   const [billData, setBillData] = useState<BillResponse | null>(null)
+  const [intervalBillData, setIntervalBillData] = useState<BillIntervalsResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const [intervalLoading, setIntervalLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [intervalError, setIntervalError] = useState<string | null>(null)
+  const [activeRange, setActiveRange] = useState<RangeWindow | null>(null)
 
   const fetchBill = useCallback(async (from: Date, to: Date) => {
     setLoading(true)
     setError(null)
+    setIntervalError(null)
     try {
       const data = await getBill(from.toISOString(), to.toISOString())
       setBillData(data)
+      setActiveRange({ from, to })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load bill estimate')
       setBillData(null)
+      setActiveRange(null)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    if (breakdownMode !== 'interval_5m') return
+    if (!activeRange) return
+
+    async function fetchIntervals() {
+      setIntervalLoading(true)
+      setIntervalError(null)
+      try {
+        const data = await getBillIntervals(activeRange.from.toISOString(), activeRange.to.toISOString())
+        setIntervalBillData(data)
+      } catch (err) {
+        setIntervalBillData(null)
+        setIntervalError(err instanceof Error ? err.message : 'Failed to load 5-minute breakdown')
+      } finally {
+        setIntervalLoading(false)
+      }
+    }
+
+    fetchIntervals()
+  }, [breakdownMode, activeRange])
 
   useEffect(() => {
     if (preset === 'custom') return
@@ -120,6 +149,26 @@ export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
           }`}
         >
           Custom
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2 mb-5">
+        <span className="text-xs text-gray-500 uppercase tracking-wide">Breakdown</span>
+        <button
+          onClick={() => setBreakdownMode('daily')}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            breakdownMode === 'daily' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+          }`}
+        >
+          Daily
+        </button>
+        <button
+          onClick={() => setBreakdownMode('interval_5m')}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            breakdownMode === 'interval_5m' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+          }`}
+        >
+          5-min
         </button>
       </div>
 
@@ -194,7 +243,7 @@ export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
           </div>
 
           {/* Daily breakdown */}
-          {billData!.days.length > 0 && (
+          {breakdownMode === 'daily' && billData!.days.length > 0 && (
             <div className="pt-5 border-t border-gray-700">
               <h4 className="text-sm font-semibold text-gray-300 mb-3">Daily Breakdown</h4>
               <div className="overflow-x-auto">
@@ -225,6 +274,61 @@ export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {breakdownMode === 'interval_5m' && (
+            <div className="pt-5 border-t border-gray-700">
+              <h4 className="text-sm font-semibold text-gray-300 mb-3">5-minute Cost Breakdown</h4>
+
+              {intervalLoading && (
+                <p className="text-sm text-gray-400">Loading 5-minute intervals...</p>
+              )}
+
+              {intervalError && !intervalLoading && (
+                <div className="p-3 bg-red-900/40 border border-red-700 rounded text-sm text-red-300 mb-3">
+                  {intervalError}
+                </div>
+              )}
+
+              {!intervalLoading && !intervalError && intervalBillData && intervalBillData.archive_warnings && intervalBillData.archive_warnings.length > 0 && (
+                <div className="p-3 bg-amber-900/40 border border-amber-700 rounded text-sm text-amber-300 mb-3">
+                  {intervalBillData.archive_warnings.join(' ')}
+                </div>
+              )}
+
+              {!intervalLoading && !intervalError && intervalBillData && (
+                <div className="overflow-auto max-h-[28rem]">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-xs text-gray-500 border-b border-gray-700">
+                        <th className="text-left pb-2 pr-4 font-medium">Time (local)</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Import kWh</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Export kWh</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Import rate</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Export rate</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Import $</th>
+                        <th className="text-right pb-2 pr-4 font-medium">Export $</th>
+                        <th className="text-right pb-2 font-medium">Net $</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {intervalBillData.intervals.map((row) => (
+                        <tr key={row.ts_utc} className="border-b border-gray-800 hover:bg-gray-700/30">
+                          <td className="py-2 pr-4 text-gray-300">{row.ts_local}</td>
+                          <td className="py-2 pr-4 text-right text-amber-500">{row.import_kwh.toFixed(4)}</td>
+                          <td className="py-2 pr-4 text-right text-green-500">{row.export_kwh.toFixed(4)}</td>
+                          <td className="py-2 pr-4 text-right text-red-400">{row.import_rate_cents_per_kwh.toFixed(3)}c</td>
+                          <td className="py-2 pr-4 text-right text-green-400">{row.export_rate_cents_per_kwh.toFixed(3)}c</td>
+                          <td className="py-2 pr-4 text-right text-red-400">{fmtCurrency(row.import_cost)}</td>
+                          <td className="py-2 pr-4 text-right text-green-400">{fmtCurrency(row.export_credit)}</td>
+                          <td className="py-2 text-right text-white font-medium">{fmtCurrency(row.net_cost)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
         </>
