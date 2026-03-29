@@ -43,9 +43,11 @@ function fmtDate(iso: string): string {
 interface BillEstimateProps {
   freeImport: boolean
   refreshKey?: number
+  selectedDay?: string
+  onDaySelect?: (day: string) => void
 }
 
-export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
+export function BillEstimate({ freeImport, refreshKey, selectedDay, onDaySelect }: BillEstimateProps) {
   const [preset, setPreset] = useState<RangePreset>('last7')
   const [breakdownMode, setBreakdownMode] = useState<'daily' | 'interval_5m'>('daily')
   const [customFrom, setCustomFrom] = useState(format(startOfDay(subDays(new Date(), 7)), 'yyyy-MM-dd'))
@@ -78,12 +80,13 @@ export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
   useEffect(() => {
     if (breakdownMode !== 'interval_5m') return
     if (!activeRange) return
+    const range = activeRange
 
     async function fetchIntervals() {
       setIntervalLoading(true)
       setIntervalError(null)
       try {
-        const data = await getBillIntervals(activeRange.from.toISOString(), activeRange.to.toISOString())
+        const data = await getBillIntervals(range.from.toISOString(), range.to.toISOString())
         setIntervalBillData(data)
       } catch (err) {
         setIntervalBillData(null)
@@ -260,17 +263,32 @@ export function BillEstimate({ freeImport, refreshKey }: BillEstimateProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {billData!.days.map(row => (
-                      <tr key={row.day_local} className="border-b border-gray-800 hover:bg-gray-700/30">
-                        <td className="py-2 pr-4 text-gray-300">{fmtDate(row.day_local)}</td>
-                        <td className="py-2 pr-4 text-right text-amber-500">{fmtKWh(row.import_kwh)}</td>
-                        <td className="py-2 pr-4 text-right text-green-500">{fmtKWh(row.export_kwh)}</td>
-                        <td className="py-2 pr-4 text-right text-red-400">{fmtCurrency(row.import_cost)}</td>
-                        <td className="py-2 pr-4 text-right text-green-400">{fmtCurrency(row.export_credit)}</td>
-                        <td className="py-2 pr-4 text-right text-gray-400">{fmtCurrency(row.fixed_charge)}</td>
-                        <td className="py-2 text-right text-white font-medium">{fmtCurrency(row.net_cost)}</td>
-                      </tr>
-                    ))}
+                    {billData!.days.map(row => {
+                      const isSelected = selectedDay === row.day_local
+                      return (
+                        <tr
+                          key={row.day_local}
+                          onClick={() => onDaySelect?.(row.day_local)}
+                          className={`border-b border-gray-800 transition-colors ${
+                            onDaySelect ? 'cursor-pointer' : ''
+                          } ${
+                            isSelected
+                              ? 'bg-blue-900/40 border-blue-700/50'
+                              : 'hover:bg-gray-700/30'
+                          }`}
+                        >
+                          <td className={`py-2 pr-4 ${isSelected ? 'text-blue-300 font-medium' : 'text-gray-300'}`}>
+                            {fmtDate(row.day_local)}
+                          </td>
+                          <td className="py-2 pr-4 text-right text-amber-500">{fmtKWh(row.import_kwh)}</td>
+                          <td className="py-2 pr-4 text-right text-green-500">{fmtKWh(row.export_kwh)}</td>
+                          <td className="py-2 pr-4 text-right text-red-400">{fmtCurrency(row.import_cost)}</td>
+                          <td className="py-2 pr-4 text-right text-green-400">{fmtCurrency(row.export_credit)}</td>
+                          <td className="py-2 pr-4 text-right text-gray-400">{fmtCurrency(row.fixed_charge)}</td>
+                          <td className="py-2 text-right text-white font-medium">{fmtCurrency(row.net_cost)}</td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

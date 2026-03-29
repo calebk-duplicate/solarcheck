@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { getLive, getHistory, getDaily, getRates, getBill, USE_MOCK } from '../api/client'
 import type { LiveResponse, HistoryResponse, DailyResponse, RatesResponse, RatePeriod } from '../types'
 import { MetricCard } from '../components/MetricCard'
@@ -8,7 +8,7 @@ import { RatesEditor } from '../components/RatesEditor'
 import { BillEstimate } from '../components/BillEstimate'
 import { BackfillPanel } from '../components/BackfillPanel'
 import { determineStatus, formatWatts, formatTimestamp, formatKWh, formatCurrency } from '../utils/format'
-import { subHours } from 'date-fns'
+import { todayInTz, startOfLocalDay, endOfLocalDay, formatDayDisplay } from '../utils/dateTime'
 
 // Returns current HH:mm and whether it's a weekend in the given IANA timezone.
 function getCurrentTimeInTz(timezone: string): { hhmm: string; isWeekend: boolean } {
@@ -62,24 +62,61 @@ export function Dashboard() {
   const [lastLiveError, setLastLiveError] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(Date.now())
   const [refreshKey, setRefreshKey] = useState(0)
+  // selectedDay: local date string "YYYY-MM-DD" in the configured timezone
+  const [selectedDay, setSelectedDay] = useState<string>('')
+  // timezone from the rates config
+  const [timezone, setTimezone] = useState<string>('UTC')
+  // chartVersion tracks user-triggered day changes; starts at -1 so the effect
+  // can distinguish "initial load" (chartVersion === -1 → skip) from user actions.
+  const [chartVersion, setChartVersion] = useState(-1)
+
+  const chartRef = useRef<HTMLDivElement>(null)
 
   const isConnected = lastLiveSuccessAt !== null && nowMs - lastLiveSuccessAt <= 10000
+  const todayKey = timezone ? todayInTz(timezone) : ''
+
+  // Fetch data for a specific local day and update chart/summary state
+  const fetchDayData = useCallback(async (dayKey: string, tz: string) => {
+    try {
+      const from = startOfLocalDay(dayKey, tz)
+      const to = endOfLocalDay(dayKey, tz)
+      const [history, daily, bill] = await Promise.all([
+        getHistory(from.toISOString(), to.toISOString()),
+        getDaily(from.toISOString(), to.toISOString()),
+        getBill(from.toISOString(), to.toISOString()).catch(() => null),
+      ])
+      const mergedDaily = daily
+        ? {
+            ...daily,
+            import_cost: bill?.summary.total_import_cost,
+            export_credit: bill?.summary.total_export_credit,
+            net_cost: bill?.summary.total_net_cost,
+          }
+        : null
+      setHistoryData(history)
+      setDailyData(mergedDaily)
+    } catch { /* ignore */ }
+  }, [])
 
   useEffect(() => {
     async function fetchInitialData() {
       try {
         setIsLoading(true)
-        const now = new Date()
-        const yesterday = subHours(now, 24)
-        const dayStart = new Date(now)
-        dayStart.setHours(0, 0, 0, 0)
 
-        const [live, history, daily, ratesData, bill] = await Promise.all([
+        // Fetch rates first to obtain the configured timezone before computing
+        // local-day boundaries (critical for timezones far from UTC like NZ UTC+13).
+        const ratesData = await getRates()
+        const tz = ratesData.timezone || 'UTC'
+        const todayKeyLocal = todayInTz(tz)
+
+        const from = startOfLocalDay(todayKeyLocal, tz)
+        const to = endOfLocalDay(todayKeyLocal, tz)
+
+        const [live, history, daily, bill] = await Promise.all([
           getLive(),
-          getHistory(yesterday.toISOString(), now.toISOString()),
-          getDaily(dayStart.toISOString(), now.toISOString()),
-          getRates(),
-          getBill(dayStart.toISOString(), now.toISOString()).catch(() => null),
+          getHistory(from.toISOString(), to.toISOString()),
+          getDaily(from.toISOString(), to.toISOString()),
+          getBill(from.toISOString(), to.toISOString()).catch(() => null),
         ])
 
         const mergedDaily = daily
@@ -91,13 +128,18 @@ export function Dashboard() {
             }
           : null
 
+        setRates(ratesData)
+        setTimezone(tz)
+        setSelectedDay(todayKeyLocal)
         setLiveData(live)
         setHistoryData(history)
         setDailyData(mergedDaily)
-        setRates(ratesData)
         setLastLiveSuccessAt(Date.now())
         setLastLiveError(null)
         setError(null)
+        // Mark initial load complete. chartVersion moves from -1 → 0 so the
+        // day-change effect (which skips when chartVersion <= 0) won't re-fetch.
+        setChartVersion(0)
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to load data'
         setError(message)
@@ -110,18 +152,23 @@ export function Dashboard() {
     fetchInitialData()
   }, [])
 
+  // Re-fetch chart and daily summary when the user selects a different day,
+  // or when backfill forces a refresh (chartVersion > 0 skips the initial load).
   useEffect(() => {
-    if (refreshKey === 0) return
-    async function refetchHistory() {
-      try {
-        const now = new Date()
-        const yesterday = subHours(now, 24)
-        const history = await getHistory(yesterday.toISOString(), now.toISOString())
-        setHistoryData(history)
-      } catch { /* ignore */ }
-    }
-    refetchHistory()
-  }, [refreshKey])
+    if (chartVersion <= 0 || !selectedDay || !timezone) return
+    fetchDayData(selectedDay, timezone)
+  }, [chartVersion, selectedDay, timezone, fetchDayData])
+
+  // Periodically refresh today's chart data while the current day is selected.
+  useEffect(() => {
+    if (!timezone || !selectedDay) return
+    const interval = setInterval(() => {
+      if (selectedDay === todayInTz(timezone)) {
+        fetchDayData(selectedDay, timezone)
+      }
+    }, 5 * 60 * 1000) // every 5 minutes
+    return () => clearInterval(interval)
+  }, [timezone, selectedDay, fetchDayData])
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -148,6 +195,22 @@ export function Dashboard() {
 
     return () => clearInterval(heartbeat)
   }, [])
+
+  // User selects a specific day from the daily breakdown table
+  function handleDaySelect(day: string) {
+    setSelectedDay(day)
+    setChartVersion(v => v + 1)
+    // Scroll the chart into view for quick feedback (brief delay lets React flush the state update first)
+    setTimeout(() => chartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
+
+  // Reset to today's view
+  function handleBackToToday() {
+    const today = todayInTz(timezone)
+    setSelectedDay(today)
+    setChartVersion(v => v + 1)
+    chartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 
   if (isLoading) {
     return (
@@ -229,14 +292,42 @@ export function Dashboard() {
         )}
 
         {historyData && historyData.data.length > 0 && (
-          <div className="mb-8">
-            <HistoryChart data={historyData.data} />
+          <div className="mb-8" ref={chartRef}>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-wide">
+                  {selectedDay === todayKey ? 'Today' : 'Selected day'}
+                </p>
+                <p className="text-sm font-medium text-gray-300">
+                  {selectedDay && timezone ? formatDayDisplay(selectedDay, timezone) : ''}
+                </p>
+              </div>
+              {selectedDay && todayKey && selectedDay !== todayKey && (
+                <button
+                  onClick={handleBackToToday}
+                  className="px-3 py-1.5 rounded text-sm font-medium bg-blue-700 hover:bg-blue-600 text-white transition-colors"
+                >
+                  ← Back to Today
+                </button>
+              )}
+            </div>
+            <HistoryChart
+              data={historyData.data}
+              title={`Day View – ${selectedDay && timezone ? formatDayDisplay(selectedDay, timezone) : ''}`}
+              timezone={timezone}
+            />
           </div>
         )}
 
         {dailyData && (
           <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 mb-8">
-            <h3 className="text-lg font-semibold mb-4">Today's Summary</h3>
+            <h3 className="text-lg font-semibold mb-4">
+              {selectedDay && timezone
+                ? selectedDay === todayKey
+                  ? "Today's Summary"
+                  : `Summary – ${formatDayDisplay(selectedDay, timezone)}`
+                : "Day Summary"}
+            </h3>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 md:gap-6">
               <div>
                 <p className="text-sm text-gray-400 mb-1">PV Generated</p>
@@ -286,9 +377,17 @@ export function Dashboard() {
           </div>
         )}
 
-        <BillEstimate freeImport={freeImport} refreshKey={refreshKey} />
+        <BillEstimate
+          freeImport={freeImport}
+          refreshKey={refreshKey}
+          selectedDay={selectedDay}
+          onDaySelect={handleDaySelect}
+        />
 
-        <BackfillPanel onComplete={() => setRefreshKey(k => k + 1)} />
+        <BackfillPanel onComplete={() => {
+          setRefreshKey(k => k + 1)
+          setChartVersion(v => v + 1)
+        }} />
 
         {rates && (
           <RatesEditor
