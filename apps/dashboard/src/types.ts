@@ -96,8 +96,8 @@ export interface BillIntervalsResponse {
 
 export interface Energy5mPoint {
   ts_utc: string
-  import_wh: number
-  export_wh: number
+  import_kwh: number
+  export_kwh: number
 }
 
 export interface Energy5mResponse {

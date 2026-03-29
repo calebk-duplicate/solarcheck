@@ -1,14 +1,16 @@
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import type { HistoryPoint } from '../types'
-import { formatTime } from '../utils/format'
+import { formatTimeInTz } from '../utils/dateTime'
 
 interface HistoryChartProps {
   data: HistoryPoint[]
+  title?: string
+  timezone?: string
 }
 
-export function HistoryChart({ data }: HistoryChartProps) {
+export function HistoryChart({ data, title = 'Day View', timezone = 'UTC' }: HistoryChartProps) {
   const chartData = data.map((point) => ({
-    time: formatTime(point.ts_utc),
+    time: formatTimeInTz(point.ts_utc, timezone),
     PV: point.pv_w,
     Load: point.load_w,
     Import: point.grid_import_w,
@@ -17,7 +19,7 @@ export function HistoryChart({ data }: HistoryChartProps) {
 
   return (
     <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
-      <h3 className="text-lg font-semibold text-white mb-4">24-Hour History</h3>
+      <h3 className="text-lg font-semibold text-white mb-4">{title}</h3>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />

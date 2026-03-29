@@ -110,12 +110,13 @@ export function EnergyChart({ fromIso, toIso }: EnergyChartProps) {
 
         const points: ChartPoint[] = energy.data.map((pt) => {
           const tsMs = new Date(pt.ts_utc).getTime()
-          const importKwh = pt.import_wh / 1000
+          const importKwh = Number(pt.import_kwh) || 0
+          const exportKwh = Number(pt.export_kwh) || 0
           const rateCents = getImportRateCents(tsMs, importPeriods, tz)
           return {
             ts: tsMs,
             Import: +importKwh.toFixed(4),
-            Export: +(pt.export_wh / 1000).toFixed(4),
+            Export: +exportKwh.toFixed(4),
             Cost: +(importKwh * rateCents / 100).toFixed(6),
           }
         })
@@ -153,7 +154,10 @@ export function EnergyChart({ fromIso, toIso }: EnergyChartProps) {
 
       {loading && <p className="text-gray-400 text-sm">Loading…</p>}
       {error && <p className="text-red-400 text-sm">{error}</p>}
-      {!loading && !error && (
+      {!loading && !error && chartData.length === 0 && (
+        <p className="text-gray-400 text-sm">No 5-minute energy data for this selected day.</p>
+      )}
+      {!loading && !error && chartData.length > 0 && (
         <ResponsiveContainer width="100%" height={300}>
           <ComposedChart data={chartData}>
             <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
