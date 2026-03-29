@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getLive, getHistory, getDaily, getRates, getBill, USE_MOCK } from '../api/client'
-import type { LiveResponse, HistoryResponse, DailyResponse, RatesResponse, RatePeriod } from '../types'
+import { getLive, getDaily, getRates, getBill, USE_MOCK } from '../api/client'
+import type { LiveResponse, DailyResponse, RatesResponse, RatePeriod } from '../types'
 import { MetricCard } from '../components/MetricCard'
 import { StatusBadge } from '../components/StatusBadge'
-import { HistoryChart } from '../components/HistoryChart'
+import { EnergyChart } from '../components/EnergyChart'
 import { RatesEditor } from '../components/RatesEditor'
 import { BillEstimate } from '../components/BillEstimate'
 import { BackfillPanel } from '../components/BackfillPanel'
@@ -53,14 +53,12 @@ function hasFreeImportNow(rates: RatesResponse): boolean {
 
 export function Dashboard() {
   const [liveData, setLiveData] = useState<LiveResponse | null>(null)
-  const [historyData, setHistoryData] = useState<HistoryResponse | null>(null)
   const [dailyData, setDailyData] = useState<DailyResponse | null>(null)
   const [rates, setRates] = useState<RatesResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [lastLiveSuccessAt, setLastLiveSuccessAt] = useState<number | null>(null)
   const [lastLiveError, setLastLiveError] = useState<string | null>(null)
-  const [nowMs, setNowMs] = useState(Date.now())
   const [refreshKey, setRefreshKey] = useState(0)
   // selectedDay: local date string "YYYY-MM-DD" in the configured timezone
   const [selectedDay, setSelectedDay] = useState<string>('')
@@ -72,7 +70,7 @@ export function Dashboard() {
 
   const chartRef = useRef<HTMLDivElement>(null)
 
-  const isConnected = lastLiveSuccessAt !== null && nowMs - lastLiveSuccessAt <= 10000
+  const isConnected = lastLiveSuccessAt !== null && !lastLiveError
   const todayKey = timezone ? todayInTz(timezone) : ''
 
   // Fetch data for a specific local day and update chart/summary state
@@ -80,11 +78,11 @@ export function Dashboard() {
     try {
       const from = startOfLocalDay(dayKey, tz)
       const to = endOfLocalDay(dayKey, tz)
-      const [history, daily, bill] = await Promise.all([
-        getHistory(from.toISOString(), to.toISOString()),
+      const [daily, bill] = await Promise.all([
         getDaily(from.toISOString(), to.toISOString()),
         getBill(from.toISOString(), to.toISOString()).catch(() => null),
       ])
+
       const mergedDaily = daily
         ? {
             ...daily,
@@ -93,7 +91,6 @@ export function Dashboard() {
             net_cost: bill?.summary.total_net_cost,
           }
         : null
-      setHistoryData(history)
       setDailyData(mergedDaily)
     } catch { /* ignore */ }
   }, [])
@@ -112,9 +109,8 @@ export function Dashboard() {
         const from = startOfLocalDay(todayKeyLocal, tz)
         const to = endOfLocalDay(todayKeyLocal, tz)
 
-        const [live, history, daily, bill] = await Promise.all([
+        const [live, daily, bill] = await Promise.all([
           getLive(),
-          getHistory(from.toISOString(), to.toISOString()),
           getDaily(from.toISOString(), to.toISOString()),
           getBill(from.toISOString(), to.toISOString()).catch(() => null),
         ])
@@ -132,7 +128,6 @@ export function Dashboard() {
         setTimezone(tz)
         setSelectedDay(todayKeyLocal)
         setLiveData(live)
-        setHistoryData(history)
         setDailyData(mergedDaily)
         setLastLiveSuccessAt(Date.now())
         setLastLiveError(null)
@@ -159,42 +154,7 @@ export function Dashboard() {
     fetchDayData(selectedDay, timezone)
   }, [chartVersion, selectedDay, timezone, fetchDayData])
 
-  // Periodically refresh today's chart data while the current day is selected.
-  useEffect(() => {
-    if (!timezone || !selectedDay) return
-    const interval = setInterval(() => {
-      if (selectedDay === todayInTz(timezone)) {
-        fetchDayData(selectedDay, timezone)
-      }
-    }, 5 * 60 * 1000) // every 5 minutes
-    return () => clearInterval(interval)
-  }, [timezone, selectedDay, fetchDayData])
-
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      try {
-        const live = await getLive()
-        setLiveData(live)
-        setLastLiveSuccessAt(Date.now())
-        setLastLiveError(null)
-        setError(null)
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to fetch live data'
-        setError(message)
-        setLastLiveError(message)
-      }
-    }, 5000)
-
-    return () => clearInterval(interval)
-  }, [])
-
-  useEffect(() => {
-    const heartbeat = setInterval(() => {
-      setNowMs(Date.now())
-    }, 1000)
-
-    return () => clearInterval(heartbeat)
-  }, [])
+  // Auto-refresh is intentionally disabled for live view.
 
   // User selects a specific day from the daily breakdown table
   function handleDaySelect(day: string) {
@@ -291,7 +251,7 @@ export function Dashboard() {
           </>
         )}
 
-        {historyData && historyData.data.length > 0 && (
+        {selectedDay && timezone && (
           <div className="mb-8" ref={chartRef}>
             <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
               <div>
@@ -299,7 +259,7 @@ export function Dashboard() {
                   {selectedDay === todayKey ? 'Today' : 'Selected day'}
                 </p>
                 <p className="text-sm font-medium text-gray-300">
-                  {selectedDay && timezone ? formatDayDisplay(selectedDay, timezone) : ''}
+                  {formatDayDisplay(selectedDay, timezone)}
                 </p>
               </div>
               {selectedDay && todayKey && selectedDay !== todayKey && (
@@ -311,10 +271,11 @@ export function Dashboard() {
                 </button>
               )}
             </div>
-            <HistoryChart
-              data={historyData.data}
-              title={`Day View – ${selectedDay && timezone ? formatDayDisplay(selectedDay, timezone) : ''}`}
-              timezone={timezone}
+
+            <EnergyChart
+              key={`${selectedDay}-${timezone}`}
+              fromIso={startOfLocalDay(selectedDay, timezone).toISOString()}
+              toIso={selectedDay === todayKey ? new Date().toISOString() : endOfLocalDay(selectedDay, timezone).toISOString()}
             />
           </div>
         )}

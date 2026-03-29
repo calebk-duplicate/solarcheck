@@ -14,13 +14,36 @@ function getCurrentMonthNZ(): string {
   return `${year}-${month}`
 }
 
+function getAutoMonthCount(startMonth: string): number {
+  if (!/^\d{4}-\d{2}$/.test(startMonth)) return 1
+
+  const [startYearRaw, startMonthRaw] = startMonth.split('-')
+  const [currentYearRaw, currentMonthRaw] = getCurrentMonthNZ().split('-')
+
+  const startYear = Number(startYearRaw)
+  const startMonthNum = Number(startMonthRaw)
+  const currentYear = Number(currentYearRaw)
+  const currentMonthNum = Number(currentMonthRaw)
+
+  if (
+    !Number.isInteger(startYear) ||
+    !Number.isInteger(startMonthNum) ||
+    !Number.isInteger(currentYear) ||
+    !Number.isInteger(currentMonthNum)
+  ) {
+    return 1
+  }
+
+  const inclusiveMonths = (currentYear - startYear) * 12 + (currentMonthNum - startMonthNum) + 1
+  return Math.min(24, Math.max(1, inclusiveMonths))
+}
+
 interface BackfillPanelProps {
   onComplete?: () => void
 }
 
 export function BackfillPanel({ onComplete }: BackfillPanelProps) {
   const [startMonth, setStartMonth] = useState(getCurrentMonthNZ)
-  const [months, setMonths] = useState(2)
   const [status, setStatus] = useState<BackfillStatus | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -57,6 +80,7 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
   useEffect(() => stopPolling, [])
 
   async function handleBackfill() {
+    const months = getAutoMonthCount(startMonth)
     setSubmitting(true)
     setNotice(null)
     setSubmitError(null)
@@ -77,6 +101,7 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
   }
 
   const isRunning = submitting || (status?.running ?? false)
+  const autoMonths = getAutoMonthCount(startMonth)
   const progress = status?.progress
   const pct =
     progress && progress.total_days > 0
@@ -102,22 +127,8 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
             className="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 disabled:opacity-50"
           />
         </div>
-        <div>
-          <label className="block text-xs text-gray-500 uppercase tracking-wide mb-1.5">
-            Months
-          </label>
-          <input
-            type="number"
-            min={1}
-            max={24}
-            value={months}
-            onChange={e => setMonths(Math.min(24, Math.max(1, Number(e.target.value))))}
-            disabled={isRunning}
-            className="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 w-20 disabled:opacity-50"
-          />
-        </div>
         <button
-          onClick={() => months > 6 ? setConfirmPending(true) : handleBackfill()}
+          onClick={() => autoMonths > 6 ? setConfirmPending(true) : handleBackfill()}
           disabled={isRunning}
           className="px-4 py-1.5 rounded text-sm font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-gray-600 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors"
         >
@@ -126,7 +137,7 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
       </div>
 
       <p className="text-xs text-gray-600 mb-5">
-        Starts from the 1st of the selected month (NZ time).
+        Starts from the 1st of the selected month through current NZ month (auto: {autoMonths} month{autoMonths === 1 ? '' : 's'}, max 24).
       </p>
 
       {/* 409 notice */}
@@ -218,7 +229,7 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
         <div className="bg-gray-800 border border-gray-700 rounded-lg p-6 max-w-sm w-full mx-4 shadow-xl">
           <h4 className="text-base font-semibold text-white mb-2">Start backfill?</h4>
           <p className="text-sm text-gray-400 mb-6">
-            Backfilling {months} months can take a while. Continue?
+            Backfilling {autoMonths} months can take a while. Continue?
           </p>
           <div className="flex justify-end gap-3">
             <button
