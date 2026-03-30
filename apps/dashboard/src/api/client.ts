@@ -161,7 +161,16 @@ export type BackfillStatus = {
   started_at_utc?: string
   completed_at_utc?: string
   last_error?: string
-  range?: { start_local: string; end_local: string; timezone: string }
+  range?: {
+    start_local: string
+    end_local: string
+    timezone: string
+    requested_start_local?: string
+    requested_end_local?: string
+    available_start_local?: string
+    available_end_local?: string
+    clamped?: boolean
+  }
   progress?: {
     total_days: number
     completed_days: number

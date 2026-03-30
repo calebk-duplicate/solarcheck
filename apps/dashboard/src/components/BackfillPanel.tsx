@@ -186,10 +186,22 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
             )}
           </div>
           {status?.range && (
-            <p className="text-xs text-gray-600">
-              {status.range.start_local} → {status.range.end_local}
-              <span className="ml-1 text-gray-700">({status.range.timezone})</span>
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-gray-600">
+                {status.range.start_local} → {status.range.end_local}
+                <span className="ml-1 text-gray-700">({status.range.timezone})</span>
+              </p>
+              {status.range.clamped && (
+                <p className="text-xs text-amber-400">
+                  Requested range was limited to available archive data.
+                </p>
+              )}
+              {status.range.available_start_local && status.range.available_end_local && (
+                <p className="text-xs text-gray-500">
+                  Available data window: {status.range.available_start_local} → {status.range.available_end_local}
+                </p>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -198,10 +210,22 @@ export function BackfillPanel({ onComplete }: BackfillPanelProps) {
       {!isRunning && status && (
         <div className="space-y-2">
           {status.range && (
-            <p className="text-xs text-gray-600">
-              {status.range.start_local} → {status.range.end_local}
-              <span className="ml-1 text-gray-700">({status.range.timezone})</span>
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-gray-600">
+                {status.range.start_local} → {status.range.end_local}
+                <span className="ml-1 text-gray-700">({status.range.timezone})</span>
+              </p>
+              {status.range.clamped && (
+                <p className="text-xs text-amber-400">
+                  Requested range was limited to available archive data.
+                </p>
+              )}
+              {status.range.available_start_local && status.range.available_end_local && (
+                <p className="text-xs text-gray-500">
+                  Available data window: {status.range.available_start_local} → {status.range.available_end_local}
+                </p>
+              )}
+            </div>
           )}
           {status.completed_at_utc && !status.last_error && (
             <p className="text-sm text-green-400">

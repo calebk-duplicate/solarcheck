@@ -38,6 +38,7 @@ export type SystemStatus = 'exporting' | 'importing' | 'neutral'
 export interface BillDayRow {
   day_local: string
   import_kwh: number
+  free_import_kwh: number
   export_kwh: number
   import_cost: number
   export_credit: number
@@ -50,6 +51,7 @@ export interface BillSummary {
   to_utc: string
   days: number
   total_import_kwh: number
+  total_free_import_kwh: number
   total_export_kwh: number
   total_import_cost: number
   total_export_credit: number
@@ -81,6 +83,7 @@ export interface BillIntervalsSummary {
   timezone: string
   count: number
   total_import_kwh: number
+  total_free_import_kwh: number
   total_export_kwh: number
   total_import_cost: number
   total_export_credit: number

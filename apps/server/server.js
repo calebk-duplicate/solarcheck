@@ -358,18 +358,13 @@ api.get('/bill', (req, res) => {
 			});
 		}
 
-		const readings = statements.getHistoryInRange.all(range.from, range.to);
-		if (readings.length >= 2) {
-			const bill = aggregateBillFromReadings(readings, rates, range.from, range.to);
-			return res.json({ ...bill, source: 'readings' });
-		}
-
 		const energyRows = statements.getEnergy5mInRange.all(range.from, range.to);
 		if (energyRows.length >= 1) {
 			const bill = aggregateBillFromEnergy5m(energyRows, rates, range.from, range.to);
 			return res.json({ ...bill, source: 'energy_5m' });
 		}
 
+		const readings = statements.getHistoryInRange.all(range.from, range.to);
 		const bill = aggregateBillFromReadings(readings, rates, range.from, range.to);
 		return res.json({ ...bill, source: 'readings' });
 	} catch (error) {
@@ -413,7 +408,7 @@ api.get('/bill-intervals', (req, res) => {
 	}
 });
 
-api.post('/archive/backfill', (req, res) => {
+api.post('/archive/backfill', async (req, res) => {
 	try {
 		if (state.archiveBackfillInProgress) {
 			return res.status(409).json({
@@ -435,7 +430,8 @@ api.post('/archive/backfill', (req, res) => {
 		const { start_month: startMonth, months } = req.body;
 		const settings = getRatesSettings(statements);
 		const timezone = settings.timezone || DEFAULT_TIMEZONE;
-		const range = buildManualArchiveBackfillRange(startMonth, months, timezone);
+		const requestedRange = buildManualArchiveBackfillRange(startMonth, months, timezone);
+		const range = await clampManualArchiveRangeToAvailableData(requestedRange, timezone);
 
 		state.manualArchiveBackfill = {
 			running: true,
@@ -880,6 +876,7 @@ function aggregateBillFromReadings(rows, rates, fromUtc, toUtc) {
 					dailyMap.set(dayLocal, {
 						day_local: dayLocal,
 						import_kwh: 0,
+						free_import_kwh: 0,
 						export_kwh: 0,
 						import_cost: 0,
 						export_credit: 0,
@@ -900,6 +897,9 @@ function aggregateBillFromReadings(rows, rates, fromUtc, toUtc) {
 
 					const bucket = dailyMap.get(dayLocal);
 					bucket.import_kwh += importKwh;
+					if (importRate === 0) {
+						bucket.free_import_kwh += importKwh;
+					}
 					bucket.export_kwh += exportKwh;
 					bucket.import_cost += importKwh * importRate;
 					bucket.export_credit += exportKwh * exportRate;
@@ -917,6 +917,7 @@ function aggregateBillFromReadings(rows, rates, fromUtc, toUtc) {
 			return {
 				day_local: item.day_local,
 				import_kwh: round3(item.import_kwh),
+				free_import_kwh: round3(item.free_import_kwh),
 				export_kwh: round3(item.export_kwh),
 				import_cost: round3(item.import_cost),
 				export_credit: round3(item.export_credit),
@@ -930,6 +931,7 @@ function aggregateBillFromReadings(rows, rates, fromUtc, toUtc) {
 		to_utc: toUtc,
 		days: days.length,
 		total_import_kwh: round3(days.reduce((sum, day) => sum + day.import_kwh, 0)),
+		total_free_import_kwh: round3(days.reduce((sum, day) => sum + day.free_import_kwh, 0)),
 		total_export_kwh: round3(days.reduce((sum, day) => sum + day.export_kwh, 0)),
 		total_import_cost: round3(days.reduce((sum, day) => sum + day.import_cost, 0)),
 		total_export_credit: round3(days.reduce((sum, day) => sum + day.export_credit, 0)),
@@ -951,6 +953,7 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 		dailyMap.set(dayLocal, {
 			day_local: dayLocal,
 			import_kwh: 0,
+			free_import_kwh: 0,
 			export_kwh: 0,
 			import_cost: 0,
 			export_credit: 0,
@@ -975,6 +978,7 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 			dailyMap.set(dayLocal, {
 				day_local: dayLocal,
 				import_kwh: 0,
+				free_import_kwh: 0,
 				export_kwh: 0,
 				import_cost: 0,
 				export_credit: 0,
@@ -993,6 +997,9 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 
 		const bucket = dailyMap.get(dayLocal);
 		bucket.import_kwh += importKwh;
+		if (importRate === 0) {
+			bucket.free_import_kwh += importKwh;
+		}
 		bucket.export_kwh += exportKwh;
 		bucket.import_cost += importKwh * importRate;
 		bucket.export_credit += exportKwh * exportRate;
@@ -1005,6 +1012,7 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 			return {
 				day_local: item.day_local,
 				import_kwh: round3(item.import_kwh),
+				free_import_kwh: round3(item.free_import_kwh),
 				export_kwh: round3(item.export_kwh),
 				import_cost: round3(item.import_cost),
 				export_credit: round3(item.export_credit),
@@ -1018,6 +1026,7 @@ function aggregateBillFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 		to_utc: toUtcIso,
 		days: days.length,
 		total_import_kwh: round3(days.reduce((sum, day) => sum + day.import_kwh, 0)),
+		total_free_import_kwh: round3(days.reduce((sum, day) => sum + day.free_import_kwh, 0)),
 		total_export_kwh: round3(days.reduce((sum, day) => sum + day.export_kwh, 0)),
 		total_import_cost: round3(days.reduce((sum, day) => sum + day.import_cost, 0)),
 		total_export_credit: round3(days.reduce((sum, day) => sum + day.export_credit, 0)),
@@ -1076,6 +1085,12 @@ function aggregateBillIntervalsFromEnergy5m(rows, rates, fromUtcIso, toUtcIso) {
 		timezone,
 		count: intervals.length,
 		total_import_kwh: round3(intervals.reduce((sum, row) => sum + row.import_kwh, 0)),
+		total_free_import_kwh: round3(
+			intervals.reduce(
+				(sum, row) => sum + (row.import_rate_cents_per_kwh === 0 ? row.import_kwh : 0),
+				0,
+			),
+		),
 		total_export_kwh: round3(intervals.reduce((sum, row) => sum + row.export_kwh, 0)),
 		total_import_cost: round3(intervals.reduce((sum, row) => sum + row.import_cost, 0)),
 		total_export_credit: round3(intervals.reduce((sum, row) => sum + row.export_credit, 0)),
@@ -1389,9 +1404,150 @@ function buildManualArchiveBackfillRange(startMonth, months, timezone) {
 		timezone,
 		start_local: startLocal.toISO({ suppressMilliseconds: true }),
 		end_local: endLocal.toISO({ suppressMilliseconds: true }),
+		requested_start_local: startLocal.toISO({ suppressMilliseconds: true }),
+		requested_end_local: endLocal.toISO({ suppressMilliseconds: true }),
 		total_days: totalDays,
 		total_requests: totalRequests,
 	};
+}
+
+async function clampManualArchiveRangeToAvailableData(range, timezone) {
+	const requestedStart = DateTime.fromISO(range.start_local, { zone: timezone });
+	const requestedEnd = DateTime.fromISO(range.end_local, { zone: timezone });
+	if (!requestedStart.isValid || !requestedEnd.isValid || requestedEnd < requestedStart) {
+		throw new Error('Invalid manual archive backfill range');
+	}
+
+	const availability = await probeArchiveAvailableRange(requestedStart, requestedEnd, timezone);
+	if (!availability.found) {
+		throw new Error(
+			`No archive data available for requested range ${requestedStart.toFormat('yyyy-LL-dd')} to ${requestedEnd.toFormat('yyyy-LL-dd')}`,
+		);
+	}
+
+	const effectiveStart = availability.firstDataLocal > requestedStart ? availability.firstDataLocal : requestedStart;
+	const effectiveEnd = availability.lastDataLocal < requestedEnd ? availability.lastDataLocal : requestedEnd;
+	if (effectiveEnd < effectiveStart) {
+		throw new Error(
+			`No archive data available after clamping to detected data window ${availability.firstDataLocal.toFormat('yyyy-LL-dd')} to ${availability.lastDataLocal.toFormat('yyyy-LL-dd')}`,
+		);
+	}
+
+	const totalDays = Math.floor(effectiveEnd.startOf('day').diff(effectiveStart.startOf('day'), 'days').days) + 1;
+	const totalRequests = Math.ceil(totalDays / MANUAL_ARCHIVE_CHUNK_DAYS);
+
+	return {
+		...range,
+		start_local: effectiveStart.toISO({ suppressMilliseconds: true }),
+		end_local: effectiveEnd.toISO({ suppressMilliseconds: true }),
+		available_start_local: availability.firstDataLocal.toISO({ suppressMilliseconds: true }),
+		available_end_local: availability.lastDataLocal.toISO({ suppressMilliseconds: true }),
+		clamped: effectiveStart > requestedStart || effectiveEnd < requestedEnd,
+		total_days: totalDays,
+		total_requests: totalRequests,
+	};
+}
+
+async function probeArchiveAvailableRange(startLocal, endLocal, timezone) {
+	const chunkDays = Math.max(1, Math.min(14, MANUAL_ARCHIVE_CHUNK_DAYS * 3));
+
+	let firstDataLocal = null;
+	let forwardCursor = startLocal.startOf('day');
+	while (forwardCursor <= endLocal) {
+		const chunkEnd = minLocalDateTime(
+			forwardCursor.plus({ days: chunkDays }).minus({ seconds: 1 }),
+			endLocal,
+		);
+
+		const buckets = await fetchArchiveDetail(
+			INVERTER_BASE_URL,
+			forwardCursor.toFormat('yyyy-LL-dd'),
+			chunkEnd.toFormat('yyyy-LL-dd'),
+			{ context: 'manual-backfill-probe-forward', emitDiagnosticsLog: false },
+		);
+
+		if (buckets.length > 0) {
+			for (let dayCursor = forwardCursor.startOf('day'); dayCursor <= chunkEnd; dayCursor = dayCursor.plus({ days: 1 })) {
+				const dayBuckets = await fetchArchiveDetail(
+					INVERTER_BASE_URL,
+					dayCursor.toFormat('yyyy-LL-dd'),
+					dayCursor.toFormat('yyyy-LL-dd'),
+					{ context: 'manual-backfill-probe-first-day', emitDiagnosticsLog: false },
+				);
+
+				if (dayBuckets.length > 0) {
+					firstDataLocal = dayCursor.startOf('day');
+					break;
+				}
+			}
+
+			if (firstDataLocal) {
+				break;
+			}
+		}
+
+		forwardCursor = chunkEnd.plus({ seconds: 1 }).startOf('day');
+	}
+
+	if (!firstDataLocal) {
+		return { found: false };
+	}
+
+	let lastDataLocal = null;
+	let backwardCursor = endLocal.endOf('day');
+	while (backwardCursor >= firstDataLocal) {
+		const chunkStart = maxLocalDateTime(
+			backwardCursor.minus({ days: chunkDays }).plus({ seconds: 1 }).startOf('day'),
+			firstDataLocal,
+		);
+
+		const buckets = await fetchArchiveDetail(
+			INVERTER_BASE_URL,
+			chunkStart.toFormat('yyyy-LL-dd'),
+			backwardCursor.toFormat('yyyy-LL-dd'),
+			{ context: 'manual-backfill-probe-backward', emitDiagnosticsLog: false },
+		);
+
+		if (buckets.length > 0) {
+			for (let dayCursor = backwardCursor.startOf('day'); dayCursor >= chunkStart; dayCursor = dayCursor.minus({ days: 1 })) {
+				const dayBuckets = await fetchArchiveDetail(
+					INVERTER_BASE_URL,
+					dayCursor.toFormat('yyyy-LL-dd'),
+					dayCursor.toFormat('yyyy-LL-dd'),
+					{ context: 'manual-backfill-probe-last-day', emitDiagnosticsLog: false },
+				);
+
+				if (dayBuckets.length > 0) {
+					lastDataLocal = dayCursor.endOf('day');
+					break;
+				}
+			}
+
+			if (lastDataLocal) {
+				break;
+			}
+		}
+
+		backwardCursor = chunkStart.minus({ seconds: 1 }).endOf('day');
+	}
+
+	if (!lastDataLocal) {
+		lastDataLocal = endLocal;
+	}
+
+	return {
+		found: true,
+		firstDataLocal,
+		lastDataLocal,
+	};
+}
+
+function minLocalDateTime(a, b) {
+	return a < b ? a : b;
+}
+
+function maxLocalDateTime(a, b) {
+	return a > b ? a : b;
 }
 
 async function runManualArchiveBackfillJob(range) {
@@ -1649,7 +1805,18 @@ function parseArchiveDetail(payload) {
 
 	const nodeEntries = Object.entries(bodyData).filter(([, node]) => node && typeof node === 'object');
 	if (nodeEntries.length < 1) {
-		throw new Error('Invalid archive payload: no data nodes in Body.Data');
+		return {
+			buckets: [],
+			diagnostics: {
+				import_history_present: false,
+				export_history_present: false,
+				selected_import_channels: [],
+				selected_export_channels: [],
+				all_channels: [],
+				nodes: [],
+				warnings: ['Archive payload contains no data nodes for requested range.'],
+			},
+		};
 	}
 
 	const mergedByChannel = {};

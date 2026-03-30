@@ -218,7 +218,7 @@ export function BillEstimate({ freeImport, refreshKey, selectedDay, onDaySelect 
       {/* Summary cards */}
       {s && !loading && (
         <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 mb-6">
             <div className="bg-gray-700/50 rounded-lg p-3">
               <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Net cost</p>
               <p className="text-xl font-bold text-white">{fmtCurrency(s.total_net_cost)}</p>
@@ -238,6 +238,10 @@ export function BillEstimate({ freeImport, refreshKey, selectedDay, onDaySelect 
             <div className="bg-gray-700/50 rounded-lg p-3">
               <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Import kWh</p>
               <p className="text-xl font-bold text-amber-500">{fmtKWh(s.total_import_kwh)}</p>
+            </div>
+            <div className="bg-gray-700/50 rounded-lg p-3">
+              <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Free import kWh</p>
+              <p className="text-xl font-bold text-cyan-400">{fmtKWh(s.total_free_import_kwh)}</p>
             </div>
             <div className="bg-gray-700/50 rounded-lg p-3">
               <p className="text-xs text-gray-500 mb-1 uppercase tracking-wide">Export kWh</p>
